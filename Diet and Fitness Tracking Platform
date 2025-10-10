@@ -1,0 +1,358 @@
+{
+  "name": "diet-fitness-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.0",
+    "body-parser": "^1.20.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^7.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  }
+}
+
+PORT=5000
+MONGO_URI=mongodb://localhost:27017/diet_fitness
+JWT_SECRET=change_this_secret
+
+
+const express = require('express');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const dotenv = require('dotenv');
+const connectDB = require('./config/db');
+
+dotenv.config();
+connectDB();
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/meals', require('./routes/meals'));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+
+const mongoose = require('mongoose');
+
+module.exports = function connectDB() {
+  const uri = process.env.MONGO_URI;
+  mongoose.connect(uri, { useNewUrlParser: true, useUnifiedTopology: true })
+    .then(() => console.log('MongoDB connected'))
+    .catch(err => {
+      console.error('MongoDB connection error', err);
+      process.exit(1);
+    });
+};
+
+
+const mongoose = require('mongoose');
+
+const UserSchema = new mongoose.Schema({
+  name: String,
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true }
+}, { timestamps: true });
+
+module.exports = mongoose.model('User', UserSchema);
+
+const mongoose = require('mongoose');
+
+const MealSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  mealName: String,
+  calories: Number,
+  date: { type: Date, default: Date.now },
+  notes: String
+}, { timestamps: true });
+
+module.exports = mongoose.model('Meal', MealSchema);
+
+
+const jwt = require('jsonwebtoken');
+
+module.exports = function(req, res, next) {
+  const token = req.header('Authorization')?.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'No token, authorization denied' });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded.user;
+    next();
+  } catch (err) {
+    res.status(401).json({ message: 'Token is not valid' });
+  }
+};
+
+
+const express = require('express');
+const router = express.Router();
+const { register, login, me } = require('../controllers/authController');
+const auth = require('../middleware/auth');
+
+router.post('/register', register);
+router.post('/login', login);
+router.get('/me', auth, me);
+
+module.exports = router;
+
+
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+exports.register = async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    let user = await User.findOne({ email });
+    if (user) return res.status(400).json({ message: 'User already exists' });
+    const salt = await bcrypt.genSalt(10);
+    const hashed = await bcrypt.hash(password, salt);
+    user = new User({ name, email, password: hashed });
+    await user.save();
+    const payload = { user: { id: user.id } };
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
+  } catch (err) {
+    console.error(err); res.status(500).send('Server error');
+  }
+};
+
+exports.login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ message: 'Invalid credentials' });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
+    const payload = { user: { id: user.id } };
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
+  } catch (err) {
+    console.error(err); res.status(500).send('Server error');
+  }
+};
+
+exports.me = async (req, res) => {
+  const user = await User.findById(req.user.id).select('-password');
+  res.json(user);
+};
+
+
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth');
+const { addMeal, getMeals, updateMeal, deleteMeal } = require('../controllers/mealController');
+
+router.post('/', auth, addMeal);
+router.get('/', auth, getMeals);
+router.put('/:id', auth, updateMeal);
+router.delete('/:id', auth, deleteMeal);
+
+module.exports = router;
+
+
+const Meal = require('../models/Meal');
+
+exports.addMeal = async (req, res) => {
+  try {
+    const { mealName, calories, date, notes } = req.body;
+    const meal = new Meal({ user: req.user.id, mealName, calories, date, notes });
+    await meal.save();
+    res.json({ message: 'Meal added', meal });
+  } catch (err) {
+    console.error(err); res.status(500).send('Server error');
+  }
+};
+
+exports.getMeals = async (req, res) => {
+  try {
+    const meals = await Meal.find({ user: req.user.id }).sort({ date: -1 });
+    res.json(meals);
+  } catch (err) {
+    console.error(err); res.status(500).send('Server error');
+  }
+};
+
+exports.updateMeal = async (req, res) => {
+  try {
+    const meal = await Meal.findOneAndUpdate({ _id: req.params.id, user: req.user.id }, req.body, { new: true });
+    if (!meal) return res.status(404).json({ message: 'Meal not found' });
+    res.json({ message: 'Meal updated', meal });
+  } catch (err) {
+    console.error(err); res.status(500).send('Server error');
+  }
+};
+
+exports.deleteMeal = async (req, res) => {
+  try {
+    const meal = await Meal.findOneAndDelete({ _id: req.params.id, user: req.user.id });
+    if (!meal) return res.status(404).json({ message: 'Meal not found' });
+    res.json({ message: 'Meal deleted' });
+  } catch (err) {
+    console.error(err); res.status(500).send('Server error');
+  }
+};
+
+
+{
+  "name": "diet-fitness-client",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "react-scripts": "5.0.1",
+    "axios": "1.4.0",
+    "bootstrap": "5.3.0"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build"
+  }
+}
+
+
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+import 'bootstrap/dist/css/bootstrap.min.css';
+
+createRoot(document.getElementById('root')).render(<App />);
+
+import axios from 'axios';
+const API = axios.create({ baseURL: process.env.REACT_APP_API_URL || 'http://localhost:5000/api' });
+API.interceptors.request.use(config => {
+  const token = localStorage.getItem('token');
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+export default API;
+
+
+import React, { useEffect, useState } from 'react';
+import API from './api';
+import Login from './components/Login';
+import Dashboard from './components/Dashboard';
+
+export default function App() {
+  const [user, setUser] = useState(null);
+
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (token) {
+      API.get('/auth/me')
+        .then(res => setUser(res.data))
+        .catch(() => { localStorage.removeItem('token'); });
+    }
+  }, []);
+
+  return (
+    <div className="container py-4">
+      <h1>Diet & Fitness Tracker</h1>
+      {user ? <Dashboard user={user} /> : <Login onLogin={u => setUser(u)} />}
+    </div>
+  );
+}
+
+
+import React, { useState } from 'react';
+import API from '../api';
+
+export default function Login({ onLogin }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [mode, setMode] = useState('login');
+
+  const submit = async (e) => {
+    e.preventDefault();
+    try {
+      const url = mode === 'login' ? '/auth/login' : '/auth/register';
+      const body = mode === 'login' ? { email, password } : { name, email, password };
+      const res = await API.post(url, body);
+      localStorage.setItem('token', res.data.token);
+      onLogin(res.data.user);
+    } catch (err) { alert(err.response?.data?.message || 'Error'); }
+  };
+
+  return (
+    <div className="card p-3" style={{ maxWidth: 420 }}>
+      <h4>{mode === 'login' ? 'Login' : 'Register'}</h4>
+      <form onSubmit={submit}>
+        {mode === 'register' && (
+          <div className="mb-2"><input className="form-control" placeholder="Name" value={name} onChange={e=>setName(e.target.value)} /></div>
+        )}
+        <div className="mb-2"><input className="form-control" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} /></div>
+        <div className="mb-2"><input type="password" className="form-control" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} /></div>
+        <button className="btn btn-primary me-2" type="submit">{mode === 'login' ? 'Login' : 'Register'}</button>
+        <button type="button" className="btn btn-link" onClick={()=>setMode(mode === 'login' ? 'register' : 'login')}>Switch</button>
+      </form>
+    </div>
+  );
+}
+
+
+import React, { useEffect, useState } from 'react';
+import API from '../api';
+
+export default function Dashboard({ user }) {
+  const [meals, setMeals] = useState([]);
+  const [mealName, setMealName] = useState('');
+  const [calories, setCalories] = useState('');
+
+  const load = async () => {
+    const res = await API.get('/meals');
+    setMeals(res.data);
+  };
+  useEffect(()=>{ load(); }, []);
+
+  const add = async (e) => {
+    e.preventDefault();
+    await API.post('/meals', { mealName, calories: Number(calories) });
+    setMealName(''); setCalories('');
+    load();
+  };
+
+  const logout = () => { localStorage.removeItem('token'); window.location.reload(); };
+
+  return (
+    <div>
+      <div className="d-flex justify-content-between align-items-center mb-3">
+        <div>Welcome, {user.name}</div>
+        <div><button className="btn btn-sm btn-outline-secondary" onClick={logout}>Logout</button></div>
+      </div>
+
+      <form className="mb-3 d-flex gap-2" onSubmit={add} style={{ maxWidth: 640 }}>
+        <input className="form-control" placeholder="Meal name" value={mealName} onChange={e=>setMealName(e.target.value)} />
+        <input className="form-control" placeholder="Calories" value={calories} onChange={e=>setCalories(e.target.value)} />
+        <button className="btn btn-primary">Add</button>
+      </form>
+
+      <h5>Recent Meals</h5>
+      <ul className="list-group">
+        {meals.map(m => (
+          <li key={m._id} className="list-group-item d-flex justify-content-between">
+            <div>
+              <strong>{m.mealName}</strong>
+              <div className="text-muted small">{new Date(m.date).toLocaleString()}</div>
+            </div>
+            <div className="align-self-center">{m.calories} kcal</div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
